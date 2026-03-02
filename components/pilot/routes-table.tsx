@@ -1,20 +1,16 @@
 'use client';
 
-import { Map } from 'lucide-react';
+import { Map, Search } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useAction } from 'next-safe-action/hooks';
 import { parseAsInteger, parseAsString, useQueryState } from 'nuqs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-import { fetchRoutesAction } from '@/actions/routes/search-routes';
-import { ActiveFilters } from '@/components/routes/active-filters';
+import { searchRoutesFtsAction } from '@/actions/routes/search-routes-fts';
 import { RouteDetailsDialog } from '@/components/routes/route-details-dialog';
-import {
-  type FilterCondition,
-  RouteFiltersBar,
-} from '@/components/routes/route-filters-bar';
 import { Button } from '@/components/ui/button';
 import { DataPagination } from '@/components/ui/data-pagination';
+import { Input } from '@/components/ui/input';
 import {
   Table,
   TableBody,
@@ -23,7 +19,6 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { formatHoursMinutes } from '@/lib/utils';
 
 interface RouteItem {
   id: string;
@@ -40,38 +35,6 @@ interface RoutesViewProps {
   total: number;
   limit?: number;
   aircraft: { id: string; name: string; livery?: string }[];
-  filters: FilterCondition[];
-}
-
-function useRouteFilterParams() {
-  const [filtersParam, setFiltersParam] = useQueryState(
-    'filters',
-    parseAsString
-  );
-
-  const filters = useMemo(() => {
-    if (!filtersParam) {
-      return [];
-    }
-    try {
-      return JSON.parse(filtersParam) as FilterCondition[];
-    } catch {
-      return [];
-    }
-  }, [filtersParam]);
-
-  const setFilters = useCallback(
-    async (newFilters: FilterCondition[]) => {
-      if (newFilters.length === 0) {
-        await setFiltersParam(null);
-      } else {
-        await setFiltersParam(JSON.stringify(newFilters));
-      }
-    },
-    [setFiltersParam]
-  );
-
-  return { filters, setFilters };
 }
 
 export function RoutesTable({
@@ -82,17 +45,16 @@ export function RoutesTable({
 }: RoutesViewProps) {
   const router = useRouter();
   const [page, setPage] = useQueryState('page', parseAsInteger.withDefault(1));
+  const [searchParam, setSearchParam] = useQueryState('search', parseAsString);
 
-  const { filters: filtersFromParams, setFilters } = useRouteFilterParams();
-
+  const [searchInput, setSearchInput] = useState(searchParam ?? '');
   const [routesState, setRoutesState] = useState<RouteItem[]>(routes);
   const [totalState, setTotalState] = useState(total);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
-  const [editingFilter, setEditingFilter] = useState<FilterCondition | null>(
-    null
-  );
 
-  const { execute: fetchRoutes, isExecuting } = useAction(fetchRoutesAction, {
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const { execute: fetchRoutes } = useAction(searchRoutesFtsAction, {
     onSuccess: ({ data }) => {
       setRoutesState(data?.routes || []);
       setTotalState(data?.total || 0);
@@ -101,20 +63,21 @@ export function RoutesTable({
   });
 
   useEffect(() => {
-    fetchRoutes({ page, limit, filters: filtersFromParams });
-  }, [page, filtersFromParams, fetchRoutes, limit]);
+    fetchRoutes({ query: searchParam ?? '', page, limit });
+  }, [page, searchParam, fetchRoutes, limit]);
 
-  const handleFiltersChange = async (newFilters: FilterCondition[]) => {
-    await Promise.all([setFilters(newFilters), setPage(1)]);
+  const handleSearchChange = (value: string) => {
+    setSearchInput(value);
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+    debounceRef.current = setTimeout(async () => {
+      await Promise.all([setSearchParam(value.trim() || null), setPage(1)]);
+    }, 300);
   };
 
   const handlePageChange = async (newPage: number) => {
     await setPage(newPage);
-    // fetch triggered automatically
-  };
-
-  const handleEditFilter = (filter: FilterCondition) => {
-    setEditingFilter(filter);
   };
 
   const totalPages = Math.ceil(totalState / limit);
@@ -131,26 +94,17 @@ export function RoutesTable({
           </p>
         </div>
         <div className="flex-shrink-0">
-          <RouteFiltersBar
-            aircraft={aircraft}
-            currentFilters={filtersFromParams}
-            isExecuting={isExecuting && !isInitialLoad}
-            onFiltersChange={handleFiltersChange}
-            showFilterButtonOnly={true}
-            editingFilter={editingFilter}
-            onEditFilter={handleEditFilter}
-            onClearEditingFilter={() => setEditingFilter(null)}
-          />
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              className="pl-9 w-full md:w-64"
+              placeholder="Search routes..."
+              value={searchInput}
+              onChange={(e) => handleSearchChange(e.target.value)}
+            />
+          </div>
         </div>
       </div>
-
-      <ActiveFilters
-        aircraft={aircraft}
-        currentFilters={filtersFromParams}
-        isExecuting={isExecuting && !isInitialLoad}
-        onFiltersChange={handleFiltersChange}
-        onEditFilter={handleEditFilter}
-      />
 
       <section className="space-y-4">
         <div className="overflow-hidden rounded-md border border-border bg-panel shadow-sm">
@@ -167,7 +121,7 @@ export function RoutesTable({
                   Arrival
                 </TableHead>
                 <TableHead className="bg-muted/50 font-semibold text-foreground">
-                  Flight Time
+                  Aircraft Types
                 </TableHead>
                 <TableHead className="w-[180px] bg-muted/50 font-semibold text-foreground text-right" />
               </TableRow>
@@ -186,112 +140,121 @@ export function RoutesTable({
                   </TableCell>
                 </TableRow>
               ) : (
-                routesState.map((route) => (
-                  <TableRow
-                    key={route.id}
-                    className="transition-colors hover:bg-muted/30"
-                  >
-                    <TableCell className="text-foreground">
-                      <div className="flex flex-wrap gap-1">
-                        {(() => {
-                          const nums = route.flightNumbers || [];
-                          const visible = nums.slice(0, 3);
-                          return (
-                            <>
-                              {visible.map((n) => (
-                                <span
-                                  key={n}
-                                  className="rounded px-2 py-0.5 text-xs bg-panel-accent text-panel-accent-foreground dark:bg-nav-hover dark:text-panel-foreground uppercase"
-                                >
-                                  {n}
-                                </span>
-                              ))}
-                              {nums.length > 3 && (
-                                <span className="rounded px-2 py-0.5 text-xs bg-panel-accent text-panel-accent-foreground dark:bg-nav-hover dark:text-panel-foreground">
-                                  +{nums.length - 3}
-                                </span>
+                routesState.map((route) => {
+                  const uniqueAircraftNames = Array.from(
+                    new Set(
+                      (route.aircraftIds || [])
+                        .map((id) => aircraft.find((a) => a.id === id)?.name)
+                        .filter((n): n is string => Boolean(n))
+                    )
+                  );
+
+                  return (
+                    <TableRow
+                      key={route.id}
+                      className="transition-colors hover:bg-muted/30"
+                    >
+                      <TableCell className="text-foreground">
+                        <div className="flex flex-wrap gap-1">
+                          {(() => {
+                            const nums = route.flightNumbers || [];
+                            const visible = nums.slice(0, 3);
+                            return (
+                              <>
+                                {visible.map((n) => (
+                                  <span
+                                    key={n}
+                                    className="rounded px-2 py-0.5 text-xs bg-panel-accent text-panel-accent-foreground dark:bg-nav-hover dark:text-panel-foreground uppercase"
+                                  >
+                                    {n}
+                                  </span>
+                                ))}
+                                {nums.length > 3 && (
+                                  <span className="rounded px-2 py-0.5 text-xs bg-panel-accent text-panel-accent-foreground dark:bg-nav-hover dark:text-panel-foreground">
+                                    +{nums.length - 3}
+                                  </span>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </div>
+                      </TableCell>
+                      <TableCell className="font-medium text-foreground uppercase">
+                        {route.departureIcao}
+                      </TableCell>
+                      <TableCell className="font-medium text-foreground uppercase">
+                        {route.arrivalIcao}
+                      </TableCell>
+                      <TableCell className="text-foreground">
+                        <div className="flex flex-wrap gap-1">
+                          {uniqueAircraftNames.map((name) => (
+                            <span
+                              key={name}
+                              className="rounded px-2 py-0.5 text-xs bg-panel-accent text-panel-accent-foreground dark:bg-nav-hover dark:text-panel-foreground"
+                            >
+                              {name}
+                            </span>
+                          ))}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex justify-end gap-2">
+                          <RouteDetailsDialog
+                            departureIcao={route.departureIcao}
+                            arrivalIcao={route.arrivalIcao}
+                            flightNumbers={route.flightNumbers}
+                            flightTime={route.flightTime}
+                            aircraftNames={aircraft
+                              .filter((a) => route.aircraftIds?.includes(a.id))
+                              .map((a) =>
+                                a.livery ? `${a.name} (${a.livery})` : a.name
                               )}
-                            </>
-                          );
-                        })()}
-                      </div>
-                    </TableCell>
-                    <TableCell className="font-medium text-foreground uppercase">
-                      {route.departureIcao}
-                    </TableCell>
-                    <TableCell className="font-medium text-foreground uppercase">
-                      {route.arrivalIcao}
-                    </TableCell>
-                    <TableCell className="text-foreground">
-                      {formatHoursMinutes(route.flightTime)}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex justify-end gap-2">
-                        <RouteDetailsDialog
-                          departureIcao={route.departureIcao}
-                          arrivalIcao={route.arrivalIcao}
-                          flightNumbers={route.flightNumbers}
-                          flightTime={route.flightTime}
-                          aircraftNames={aircraft
-                            .filter((a) => route.aircraftIds?.includes(a.id))
-                            .map((a) =>
-                              a.livery ? `${a.name} (${a.livery})` : a.name
-                            )}
-                          trigger={
-                            <Button size="sm" variant="outline">
-                              View
-                            </Button>
-                          }
-                        />
-                        <Button
-                          size="sm"
-                          variant="default"
-                          onClick={() => {
-                            const flightTimeHours = Math.floor(
-                              route.flightTime / 60
-                            );
-                            const flightTimeMinutes = route.flightTime % 60;
-                            const singleFlightNumber =
-                              route.flightNumbers?.length === 1
-                                ? route.flightNumbers[0]
-                                : undefined;
-                            const singleAircraft =
-                              route.aircraftIds?.length === 1
-                                ? route.aircraftIds[0]
-                                : undefined;
+                            trigger={
+                              <Button size="sm" variant="outline">
+                                View
+                              </Button>
+                            }
+                          />
+                          <Button
+                            size="sm"
+                            variant="default"
+                            onClick={() => {
+                              const flightTimeHours = Math.floor(
+                                route.flightTime / 60
+                              );
+                              const flightTimeMinutes = route.flightTime % 60;
+                              const singleFlightNumber =
+                                route.flightNumbers?.length === 1
+                                  ? route.flightNumbers[0]
+                                  : undefined;
+                              const singleAircraft =
+                                route.aircraftIds?.length === 1
+                                  ? route.aircraftIds[0]
+                                  : undefined;
 
-                            // Find aircraft filter if any
-                            const aircraftFilter = filtersFromParams.find(
-                              (f) =>
-                                f.field === 'aircraftId' && f.operator === 'is'
-                            );
-
-                            const params = new URLSearchParams({
-                              ...(singleFlightNumber && {
-                                flightNumber: singleFlightNumber,
-                              }),
-                              departureIcao: route.departureIcao,
-                              arrivalIcao: route.arrivalIcao,
-                              flightTimeHours: flightTimeHours.toString(),
-                              flightTimeMinutes: flightTimeMinutes.toString(),
-                              ...(singleAircraft && {
-                                aircraftId: singleAircraft,
-                              }),
-                              ...(aircraftFilter?.value &&
-                                !singleAircraft && {
-                                  aircraftId: aircraftFilter.value.toString(),
+                              const params = new URLSearchParams({
+                                ...(singleFlightNumber && {
+                                  flightNumber: singleFlightNumber,
                                 }),
-                            });
+                                departureIcao: route.departureIcao,
+                                arrivalIcao: route.arrivalIcao,
+                                flightTimeHours: flightTimeHours.toString(),
+                                flightTimeMinutes: flightTimeMinutes.toString(),
+                                ...(singleAircraft && {
+                                  aircraftId: singleAircraft,
+                                }),
+                              });
 
-                            router.push(`/pireps?${params.toString()}`);
-                          }}
-                        >
-                          File PIREP
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))
+                              router.push(`/pireps?${params.toString()}`);
+                            }}
+                          >
+                            File PIREP
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })
               )}
             </TableBody>
           </Table>

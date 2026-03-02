@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 
-import { findRouteIdsByFilters } from '@/db/queries';
+import { findRouteIdsByFilters, findRouteIdsByFtsSearch } from '@/db/queries';
 import { deleteRoute, deleteRoutesByIds } from '@/domains/routes/delete-route';
 import { handleDbError } from '@/lib/db-error';
 import { createRoleActionClient } from '@/lib/safe-action';
@@ -84,6 +84,44 @@ export const deleteBulkRoutesAction = createRoleActionClient(['routes'])
       return {
         success: true,
         message: `${deleted} route${deleted === 1 ? '' : 's'} deleted`,
+      } as const;
+    } catch (error) {
+      handleDbError(error, {
+        fallback: 'Failed to delete routes',
+        constraint:
+          'Cannot delete routes - one or more are being used in existing records',
+        reference:
+          'Cannot delete routes - they have associated data that must be removed first',
+      });
+    }
+  });
+
+const deleteBySearchSchema = z.object({ query: z.string() });
+
+export const deleteRoutesBySearchAction = createRoleActionClient(['routes'])
+  .inputSchema(deleteBySearchSchema)
+  .action(async ({ parsedInput }) => {
+    const { query } = parsedInput;
+
+    try {
+      const ids = await findRouteIdsByFtsSearch(query);
+
+      if (ids.length === 0) {
+        return {
+          success: true,
+          message: 'No routes matched search',
+          deleted: 0,
+        } as const;
+      }
+
+      const { deleted } = await deleteRoutesByIds(ids);
+
+      revalidatePath('/admin/routes');
+
+      return {
+        success: true,
+        message: `Deleted ${deleted} route${deleted === 1 ? '' : 's'}`,
+        deleted,
       } as const;
     } catch (error) {
       handleDbError(error, {
