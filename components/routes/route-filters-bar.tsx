@@ -151,7 +151,9 @@ export function RouteFiltersBar({
 
   const addNewFilter = () => {
     const newFilter: FilterCondition = {
-      id: crypto.randomUUID(),
+      id:
+        globalThis.crypto?.randomUUID?.() ??
+        Math.random().toString(36).slice(2),
       field: 'flightNumber',
       operator: 'contains',
       value: '',
