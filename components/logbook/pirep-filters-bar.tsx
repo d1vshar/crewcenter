@@ -154,7 +154,9 @@ export function PirepFiltersBar({
 
   const addNewFilter = () => {
     const newFilter: PirepFilterCondition = {
-      id: crypto.randomUUID(),
+      id:
+        globalThis.crypto?.randomUUID?.() ??
+        Math.random().toString(36).slice(2),
       field: 'flightNumber',
       operator: 'contains',
       value: '',
