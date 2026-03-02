@@ -1,4 +1,4 @@
-import { desc, eq, SQL, sql } from 'drizzle-orm';
+import { desc, eq, inArray, SQL, sql } from 'drizzle-orm';
 
 import { db } from '@/db';
 import {
@@ -426,9 +426,66 @@ async function findRouteIdsByFilters(
   return result.map((r) => r.id);
 }
 
+function buildFtsMatchQuery(query: string): string {
+  return query
+    .trim()
+    .split(/\s+/)
+    .map((t) => `"${t.replace(/"/g, '""')}"*`)
+    .join(' OR ');
+}
+
+async function searchRoutesWithFts(
+  query: string,
+  page: number,
+  limit: number
+): Promise<PaginatedResult<RouteWithNumbers>> {
+  if (!query.trim()) {
+    return getRoutesPaginated(page, limit);
+  }
+
+  const ftsQuery = buildFtsMatchQuery(query);
+
+  const ftsResult = await db.$client.execute({
+    sql: `SELECT route_id FROM routes_fts WHERE routes_fts MATCH ?`,
+    args: [ftsQuery],
+  });
+
+  if (ftsResult.rows.length === 0) {
+    return { routes: [], total: 0 };
+  }
+
+  const ids = ftsResult.rows.map((row) => String(row.route_id ?? row[0]));
+  const whereCondition = inArray(routes.id, ids) as unknown as SQL<boolean>;
+
+  const result = await buildPaginatedQuery(whereCondition, page, limit);
+  return {
+    routes: result.map(({ ...route }) =>
+      transformRouteResult(route as RouteRow)
+    ),
+    total: result[0]?.totalCount ?? 0,
+  };
+}
+
+async function findRouteIdsByFtsSearch(query: string): Promise<string[]> {
+  if (!query.trim()) {
+    return [];
+  }
+
+  const ftsQuery = buildFtsMatchQuery(query);
+
+  const ftsResult = await db.$client.execute({
+    sql: `SELECT route_id FROM routes_fts WHERE routes_fts MATCH ?`,
+    args: [ftsQuery],
+  });
+
+  return ftsResult.rows.map((row) => String(row.route_id ?? row[0]));
+}
+
 export {
   filterRoutesAdvanced,
   findRouteIdsByFilters,
+  findRouteIdsByFtsSearch,
   getRouteById,
   getRoutesPaginated,
+  searchRoutesWithFts,
 };

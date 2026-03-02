@@ -1,23 +1,20 @@
 'use client';
 
-import { Map, MoreHorizontal, Plus, Trash, Upload } from 'lucide-react';
+import { Map, MoreHorizontal, Plus, Search, Trash, Upload } from 'lucide-react';
 import { useAction } from 'next-safe-action/hooks';
 import { parseAsInteger, parseAsString, useQueryState } from 'nuqs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import {
   deleteBulkRoutesAction,
-  deleteFilteredRoutesAction,
   deleteRouteAction,
+  deleteRoutesBySearchAction,
 } from '@/actions/routes/delete-route';
-import { fetchRoutesAction } from '@/actions/routes/search-routes';
-import { ActiveFilters } from '@/components/routes/active-filters';
+import { searchRoutesFtsAction } from '@/actions/routes/search-routes-fts';
 import CreateRouteDialog from '@/components/routes/create-route-dialog';
 import EditRouteDialog from '@/components/routes/edit-route-dialog';
 import ImportRoutesDialog from '@/components/routes/import-routes-dialog';
-import type { FilterCondition } from '@/components/routes/route-filters-bar';
-import { RouteFiltersBar } from '@/components/routes/route-filters-bar';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { DataPagination } from '@/components/ui/data-pagination';
@@ -34,6 +31,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Input } from '@/components/ui/input';
 import { ResponsiveDialogFooter } from '@/components/ui/responsive-dialog-footer';
 import {
   Table,
@@ -46,7 +44,6 @@ import {
 import { useResponsiveDialog } from '@/hooks/use-responsive-dialog';
 import { useSession } from '@/lib/auth-client';
 import { isOwnerOrAdmin } from '@/lib/roles';
-import { formatHoursMinutes } from '@/lib/utils';
 
 interface RouteItem {
   id: string;
@@ -70,38 +67,6 @@ interface AdminRoutesViewProps {
   total: number;
   limit?: number;
   aircraft: AircraftWithLivery[];
-  filters: FilterCondition[];
-}
-
-function useRouteFilterParams() {
-  const [filtersParam, setFiltersParam] = useQueryState(
-    'filters',
-    parseAsString
-  );
-
-  const filters = useMemo(() => {
-    if (!filtersParam) {
-      return [];
-    }
-    try {
-      return JSON.parse(filtersParam) as FilterCondition[];
-    } catch {
-      return [];
-    }
-  }, [filtersParam]);
-
-  const setFilters = useCallback(
-    async (newFilters: FilterCondition[]) => {
-      if (newFilters.length === 0) {
-        await setFiltersParam(null);
-      } else {
-        await setFiltersParam(JSON.stringify(newFilters));
-      }
-    },
-    [setFiltersParam]
-  );
-
-  return { filters, setFilters };
 }
 
 export function AdminRoutesView({
@@ -111,20 +76,19 @@ export function AdminRoutesView({
   aircraft,
 }: AdminRoutesViewProps) {
   const [page, setPage] = useQueryState('page', parseAsInteger.withDefault(1));
+  const [searchParam, setSearchParam] = useQueryState('search', parseAsString);
   const { data: session } = useSession();
   const canBulkDelete = isOwnerOrAdmin(session?.user?.role ?? null);
   const { dialogStyles } = useResponsiveDialog({
     maxWidth: 'sm:max-w-[420px]',
   });
 
-  const { filters: filtersFromParams, setFilters } = useRouteFilterParams();
-
+  const [searchInput, setSearchInput] = useState(searchParam ?? '');
   const [routesState, setRoutesState] = useState<RouteItem[]>(routes);
   const [totalState, setTotalState] = useState(total);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
-  const [editingFilter, setEditingFilter] = useState<FilterCondition | null>(
-    null
-  );
+
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [routeToDelete, setRouteToDelete] = useState<RouteItem | null>(null);
@@ -134,34 +98,38 @@ export function AdminRoutesView({
     new Set()
   );
   const [deleteMode, setDeleteMode] = useState<
-    'single' | 'selected' | 'filtered'
+    'single' | 'selected' | 'search'
   >('single');
 
   const totalPages = Math.ceil(totalState / limit);
 
-  const { execute: fetchRoutes, isExecuting } = useAction(fetchRoutesAction, {
-    onSuccess: ({ data }) => {
-      setRoutesState(data?.routes || []);
-      setTotalState(data?.total || 0);
-      setIsInitialLoad(false);
-    },
-  });
+  const { execute: fetchRoutes, isExecuting } = useAction(
+    searchRoutesFtsAction,
+    {
+      onSuccess: ({ data }) => {
+        setRoutesState(data?.routes || []);
+        setTotalState(data?.total || 0);
+        setIsInitialLoad(false);
+      },
+    }
+  );
 
   useEffect(() => {
-    fetchRoutes({ page, limit, filters: filtersFromParams });
-  }, [page, filtersFromParams, fetchRoutes, limit]);
+    fetchRoutes({ query: searchParam ?? '', page, limit });
+  }, [page, searchParam, fetchRoutes, limit]);
 
-  const handleFiltersChange = async (newFilters: FilterCondition[]) => {
-    await Promise.all([setFilters(newFilters), setPage(1)]);
+  const handleSearchChange = (value: string) => {
+    setSearchInput(value);
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+    debounceRef.current = setTimeout(async () => {
+      await Promise.all([setSearchParam(value.trim() || null), setPage(1)]);
+    }, 300);
   };
 
   const handlePageChange = async (newPage: number) => {
     await setPage(newPage);
-    // fetch triggered automatically
-  };
-
-  const handleEditFilter = (filter: FilterCondition) => {
-    setEditingFilter(filter);
   };
 
   const { execute: deleteRoute, isExecuting: isDeleting } = useAction(
@@ -172,8 +140,7 @@ export function AdminRoutesView({
         setDeleteDialogOpen(false);
         setRouteToDelete(null);
         setSelectedRouteIds(new Set());
-        // Refresh the routes after deletion
-        fetchRoutes({ page, limit, filters: filtersFromParams });
+        fetchRoutes({ query: searchParam ?? '', page, limit });
       },
       onError: ({ error }) => {
         toast.error(error.serverError || 'Failed to delete route');
@@ -189,8 +156,7 @@ export function AdminRoutesView({
         setDeleteDialogOpen(false);
         setSelectedRouteIds(new Set());
         setDeleteMode('single');
-        // Refresh the routes after deletion
-        fetchRoutes({ page, limit, filters: filtersFromParams });
+        fetchRoutes({ query: searchParam ?? '', page, limit });
       },
       onError: ({ error }) => {
         toast.error(error.serverError || 'Failed to delete routes');
@@ -198,25 +164,19 @@ export function AdminRoutesView({
     }
   );
 
-  const { execute: deleteFilteredRoutes, isExecuting: isDeletingFiltered } =
-    useAction(deleteFilteredRoutesAction, {
+  const { execute: deleteBySearch, isExecuting: isDeletingBySearch } =
+    useAction(deleteRoutesBySearchAction, {
       onSuccess: ({ data }) => {
         toast.success(data?.message || 'Routes deleted');
         setDeleteDialogOpen(false);
         setSelectedRouteIds(new Set());
         setDeleteMode('single');
-        // Refresh the routes after deletion
-        fetchRoutes({ page, limit, filters: filtersFromParams });
+        fetchRoutes({ query: searchParam ?? '', page, limit });
       },
       onError: ({ error }) => {
         toast.error(error.serverError || 'Failed to delete routes');
       },
     });
-
-  useEffect(() => {
-    // Fetch routes whenever page changes or filters in URL change
-    fetchRoutes({ page, limit, filters: filtersFromParams });
-  }, [page, filtersFromParams, fetchRoutes, limit]);
 
   const handleDeleteClick = (route: RouteItem) => {
     setRouteToDelete(route);
@@ -232,14 +192,14 @@ export function AdminRoutesView({
     setDeleteDialogOpen(true);
   };
 
-  const handleFilteredDeleteClick = () => {
-    setDeleteMode('filtered');
+  const handleSearchDeleteClick = () => {
+    setDeleteMode('search');
     setDeleteDialogOpen(true);
   };
 
   const confirmDelete = () => {
-    if (deleteMode === 'filtered') {
-      deleteFilteredRoutes({ filters: filtersFromParams });
+    if (deleteMode === 'search') {
+      deleteBySearch({ query: searchParam ?? '' });
     } else if (deleteMode === 'selected') {
       deleteBulkRoutes({ ids: Array.from(selectedRouteIds) });
     } else if (routeToDelete) {
@@ -288,23 +248,21 @@ export function AdminRoutesView({
         </div>
         <div className="shrink-0">
           <div className="flex items-center gap-2">
-            <RouteFiltersBar
-              aircraft={aircraft}
-              currentFilters={filtersFromParams}
-              isExecuting={isExecuting && !isInitialLoad}
-              onFiltersChange={handleFiltersChange}
-              showFilterButtonOnly={true}
-              editingFilter={editingFilter}
-              onEditFilter={handleEditFilter}
-              onClearEditingFilter={() => setEditingFilter(null)}
-            />
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                className="pl-9 w-full md:w-56"
+                placeholder="Search routes..."
+                value={searchInput}
+                onChange={(e) => handleSearchChange(e.target.value)}
+              />
+            </div>
             <CreateRouteDialog
               aircraft={
                 aircraft as { id: string; name: string; livery: string }[]
               }
               onRouteCreated={() => {
-                // Refresh the routes data
-                fetchRoutes({ page, limit, filters: filtersFromParams });
+                fetchRoutes({ query: searchParam ?? '', page, limit });
               }}
             >
               <Button className="gap-2" size="default">
@@ -314,7 +272,7 @@ export function AdminRoutesView({
             </CreateRouteDialog>
             <ImportRoutesDialog
               onImported={() => {
-                fetchRoutes({ page, limit, filters: filtersFromParams });
+                fetchRoutes({ query: searchParam ?? '', page, limit });
               }}
             >
               <Button
@@ -332,14 +290,6 @@ export function AdminRoutesView({
         </div>
       </div>
 
-      <ActiveFilters
-        aircraft={aircraft}
-        currentFilters={filtersFromParams}
-        isExecuting={isExecuting && !isInitialLoad}
-        onFiltersChange={handleFiltersChange}
-        onEditFilter={handleEditFilter}
-      />
-
       {canBulkDelete && someSelected && (
         <div className="flex flex-col gap-3 rounded-md border border-border bg-muted/30 p-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-2">
@@ -353,7 +303,7 @@ export function AdminRoutesView({
               size="sm"
               variant="destructive"
               onClick={handleBulkDeleteClick}
-              disabled={isDeleting || isBulkDeleting || isDeletingFiltered}
+              disabled={isDeleting || isBulkDeleting || isDeletingBySearch}
               className="flex w-full items-center justify-center gap-2 sm:w-auto"
             >
               <Trash className="h-4 w-4" />
@@ -362,12 +312,12 @@ export function AdminRoutesView({
             <Button
               size="sm"
               variant="destructive"
-              onClick={handleFilteredDeleteClick}
-              disabled={isDeleting || isBulkDeleting || isDeletingFiltered}
+              onClick={handleSearchDeleteClick}
+              disabled={isDeleting || isBulkDeleting || isDeletingBySearch}
               className="flex w-full items-center justify-center gap-2 sm:w-auto"
             >
               <Trash className="h-4 w-4" />
-              Delete All Filtered ({totalState})
+              Delete All Matching Search ({totalState})
             </Button>
           </div>
         </div>
@@ -384,7 +334,7 @@ export function AdminRoutesView({
                       checked={allSelected}
                       onCheckedChange={handleSelectAll}
                       disabled={
-                        isDeleting || isBulkDeleting || isDeletingFiltered
+                        isDeleting || isBulkDeleting || isDeletingBySearch
                       }
                     />
                   </TableHead>
@@ -399,7 +349,7 @@ export function AdminRoutesView({
                   Arrival
                 </TableHead>
                 <TableHead className="bg-muted/50 font-semibold text-foreground">
-                  Flight Time
+                  Aircraft Types
                 </TableHead>
                 <TableHead className="w-[50px] bg-muted/50" />
               </TableRow>
@@ -418,83 +368,102 @@ export function AdminRoutesView({
                   </TableCell>
                 </TableRow>
               ) : (
-                routesState.map((route) => (
-                  <TableRow
-                    key={route.id}
-                    className="transition-colors hover:bg-muted/30"
-                  >
-                    {canBulkDelete && (
-                      <TableCell>
-                        <Checkbox
-                          checked={selectedRouteIds.has(route.id)}
-                          onCheckedChange={(checked) =>
-                            handleSelectRoute(route.id, checked as boolean)
-                          }
-                          disabled={
-                            isDeleting || isBulkDeleting || isDeletingFiltered
-                          }
-                        />
+                routesState.map((route) => {
+                  const uniqueAircraftNames = Array.from(
+                    new Set(
+                      (route.aircraftIds || [])
+                        .map((id) => aircraft.find((a) => a.id === id)?.name)
+                        .filter((n): n is string => Boolean(n))
+                    )
+                  );
+
+                  return (
+                    <TableRow
+                      key={route.id}
+                      className="transition-colors hover:bg-muted/30"
+                    >
+                      {canBulkDelete && (
+                        <TableCell>
+                          <Checkbox
+                            checked={selectedRouteIds.has(route.id)}
+                            onCheckedChange={(checked) =>
+                              handleSelectRoute(route.id, checked as boolean)
+                            }
+                            disabled={
+                              isDeleting || isBulkDeleting || isDeletingBySearch
+                            }
+                          />
+                        </TableCell>
+                      )}
+                      <TableCell className="text-foreground">
+                        <div className="flex flex-wrap gap-1">
+                          {(() => {
+                            const nums = route.flightNumbers || [];
+                            const visible = nums.slice(0, 3);
+                            return (
+                              <>
+                                {visible.map((n) => (
+                                  <span
+                                    key={n}
+                                    className="rounded px-2 py-0.5 text-xs bg-panel-accent text-panel-accent-foreground dark:bg-nav-hover dark:text-panel-foreground"
+                                  >
+                                    {n}
+                                  </span>
+                                ))}
+                                {nums.length > 3 && (
+                                  <span className="rounded px-2 py-0.5 text-xs bg-panel-accent text-panel-accent-foreground dark:bg-nav-hover dark:text-panel-foreground">
+                                    +{nums.length - 3}
+                                  </span>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </div>
                       </TableCell>
-                    )}
-                    <TableCell className="text-foreground">
-                      <div className="flex flex-wrap gap-1">
-                        {(() => {
-                          const nums = route.flightNumbers || [];
-                          const visible = nums.slice(0, 3);
-                          return (
-                            <>
-                              {visible.map((n) => (
-                                <span
-                                  key={n}
-                                  className="rounded px-2 py-0.5 text-xs bg-panel-accent text-panel-accent-foreground dark:bg-nav-hover dark:text-panel-foreground"
-                                >
-                                  {n}
-                                </span>
-                              ))}
-                              {nums.length > 3 && (
-                                <span className="rounded px-2 py-0.5 text-xs bg-panel-accent text-panel-accent-foreground dark:bg-nav-hover dark:text-panel-foreground">
-                                  +{nums.length - 3}
-                                </span>
-                              )}
-                            </>
-                          );
-                        })()}
-                      </div>
-                    </TableCell>
-                    <TableCell className="font-medium text-foreground uppercase">
-                      {route.departureIcao}
-                    </TableCell>
-                    <TableCell className="font-medium text-foreground uppercase">
-                      {route.arrivalIcao}
-                    </TableCell>
-                    <TableCell className="text-foreground">
-                      {formatHoursMinutes(route.flightTime)}
-                    </TableCell>
-                    <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button className="h-8 w-8 p-0" variant="ghost">
-                            <MoreHorizontal className="h-4 w-4 text-foreground" />
-                            <span className="sr-only">Open menu</span>
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem
-                            onClick={() => handleEditClick(route)}
-                          >
-                            Edit Route
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            disabled={isDeleting}
-                            onClick={() => handleDeleteClick(route)}
-                          >
-                            Delete Route
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </TableCell>
-                  </TableRow>
-                ))
+                      <TableCell className="font-medium text-foreground uppercase">
+                        {route.departureIcao}
+                      </TableCell>
+                      <TableCell className="font-medium text-foreground uppercase">
+                        {route.arrivalIcao}
+                      </TableCell>
+                      <TableCell className="text-foreground">
+                        <div className="flex flex-wrap gap-1">
+                          {uniqueAircraftNames.map((name) => (
+                            <span
+                              key={name}
+                              className="rounded px-2 py-0.5 text-xs bg-panel-accent text-panel-accent-foreground dark:bg-nav-hover dark:text-panel-foreground"
+                            >
+                              {name}
+                            </span>
+                          ))}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button className="h-8 w-8 p-0" variant="ghost">
+                              <MoreHorizontal className="h-4 w-4 text-foreground" />
+                              <span className="sr-only">Open menu</span>
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem
+                              onClick={() => handleEditClick(route)}
+                            >
+                              Edit Route
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled={isDeleting}
+                              onClick={() => handleDeleteClick(route)}
+                            >
+                              Delete Route
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })
               )}
             </TableBody>
           </Table>
@@ -524,15 +493,15 @@ export function AdminRoutesView({
           <DialogHeader>
             <DialogTitle className="text-foreground">
               Delete{' '}
-              {deleteMode === 'filtered'
-                ? `All ${totalState} Filtered Route${totalState === 1 ? '' : 's'}`
+              {deleteMode === 'search'
+                ? `All ${totalState} Matching Route${totalState === 1 ? '' : 's'}`
                 : deleteMode === 'selected'
                   ? 'Routes'
                   : 'Route'}
             </DialogTitle>
             <DialogDescription className="text-foreground">
-              {deleteMode === 'filtered'
-                ? `Are you sure you want to delete all ${totalState} filtered route${totalState === 1 ? '' : 's'}? This action cannot be undone.`
+              {deleteMode === 'search'
+                ? `Are you sure you want to delete all ${totalState} route${totalState === 1 ? '' : 's'} matching the current search? This action cannot be undone.`
                 : deleteMode === 'selected'
                   ? `Are you sure you want to delete ${selectedRouteIds.size} route${selectedRouteIds.size === 1 ? '' : 's'}? This action cannot be undone.`
                   : 'Are you sure you want to delete this route? This action cannot be undone.'}
@@ -541,12 +510,12 @@ export function AdminRoutesView({
           <ResponsiveDialogFooter
             primaryButton={{
               label:
-                isDeleting || isBulkDeleting || isDeletingFiltered
+                isDeleting || isBulkDeleting || isDeletingBySearch
                   ? 'Deleting...'
                   : 'Delete',
               onClick: confirmDelete,
-              disabled: isDeleting || isBulkDeleting || isDeletingFiltered,
-              loading: isDeleting || isBulkDeleting || isDeletingFiltered,
+              disabled: isDeleting || isBulkDeleting || isDeletingBySearch,
+              loading: isDeleting || isBulkDeleting || isDeletingBySearch,
               loadingLabel: 'Deleting...',
               className:
                 'bg-destructive text-destructive-foreground hover:bg-destructive/90',
@@ -554,7 +523,7 @@ export function AdminRoutesView({
             secondaryButton={{
               label: 'Cancel',
               onClick: () => setDeleteDialogOpen(false),
-              disabled: isDeleting || isBulkDeleting || isDeletingFiltered,
+              disabled: isDeleting || isBulkDeleting || isDeletingBySearch,
             }}
           />
         </DialogContent>
@@ -575,8 +544,7 @@ export function AdminRoutesView({
           }}
           aircraft={aircraft}
           onSaved={() => {
-            // refetch list after save
-            fetchRoutes({ page, limit, filters: filtersFromParams });
+            fetchRoutes({ query: searchParam ?? '', page, limit });
           }}
         />
       )}

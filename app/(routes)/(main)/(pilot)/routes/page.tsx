@@ -1,12 +1,10 @@
 import type { Metadata } from 'next';
 
 import { RoutesTable } from '@/components/pilot/routes-table';
-import { type FilterCondition } from '@/components/routes/route-filters-bar';
 import {
-  filterRoutesAdvanced,
   getAircraft,
   getRoutesPaginated,
-  RouteFilterCondition,
+  searchRoutesWithFts,
 } from '@/db/queries';
 import { requireAuth } from '@/lib/auth-check';
 
@@ -19,7 +17,7 @@ export function generateMetadata(): Metadata {
 interface RoutesPageProps {
   searchParams?: Promise<{
     page?: string;
-    filters?: string;
+    search?: string;
   }>;
 }
 
@@ -29,21 +27,11 @@ export default async function RoutesPage({ searchParams }: RoutesPageProps) {
   const resolvedParams = searchParams ? await searchParams : {};
   const page = resolvedParams?.page ? parseInt(resolvedParams.page, 10) : 1;
   const limit = 10;
-
-  let filters: FilterCondition[] = [];
-  if (resolvedParams?.filters) {
-    try {
-      filters = JSON.parse(resolvedParams.filters);
-    } catch {
-      filters = [];
-    }
-  }
-
-  const hasAnyFilter = filters.length > 0;
+  const search = resolvedParams?.search ?? '';
 
   const [{ routes, total }, aircraft] = await Promise.all([
-    hasAnyFilter
-      ? filterRoutesAdvanced(filters as RouteFilterCondition[], page, limit)
+    search.trim()
+      ? searchRoutesWithFts(search, page, limit)
       : getRoutesPaginated(page, limit),
     getAircraft(),
   ]);
@@ -54,7 +42,6 @@ export default async function RoutesPage({ searchParams }: RoutesPageProps) {
       total={total}
       limit={limit}
       aircraft={aircraft}
-      filters={filters}
     />
   );
 }
