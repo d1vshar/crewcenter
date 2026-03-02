@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 import { db } from '@/db';
 import { airline, leaveRequests, pireps, type User, users } from '@/db/schema';
@@ -11,7 +11,8 @@ type InactiveUserOutput = Pick<
 };
 
 /**
- * Get the current time and calculated inactivity cutoff time
+ * Get the current time and calculated inactivity cutoff time (seconds)
+ * Note: SQLite stores timestamps in seconds, not milliseconds
  */
 async function getInactivityTimeframe() {
   const nowSeconds = Math.floor(Date.now() / 1000);
@@ -20,9 +21,9 @@ async function getInactivityTimeframe() {
     .from(airline)
     .limit(1);
   const inactivityPeriod = airlineData[0]?.inactivityPeriod || 30;
-  const daysAgoSeconds = nowSeconds - inactivityPeriod * 24 * 60 * 60;
+  const cutoffSeconds = nowSeconds - inactivityPeriod * 24 * 60 * 60;
 
-  return { nowSeconds, daysAgoSeconds };
+  return { nowSeconds, cutoffSeconds };
 }
 
 function createLastFlightSubquery() {
@@ -39,24 +40,24 @@ function createLastFlightSubquery() {
 
 /**
  * Create inactivity where condition
+ *
+ * A user is considered inactive if:
+ * 1. They are verified (only check verified pilots)
+ * 2. They are NOT banned
+ * 3. Their last activity (last flight OR join date if no flights) is older than the cutoff
+ * 4. They are NOT on an active approved leave
  */
-function createInactivityWhereCondition(
-  searchCondition: ReturnType<typeof sql<boolean>>,
+function createInactiveUsersCondition(
   nowSeconds: number,
-  daysAgoSeconds: number
+  cutoffSeconds: number
 ) {
   return sql<boolean>`
-    ${searchCondition}
-    AND EXISTS (
-      SELECT 1 FROM ${pireps} p_any
-      WHERE p_any.user_id = ${users.id}
-    )
-    AND NOT EXISTS (
-      SELECT 1 FROM ${pireps} p
-      WHERE p.user_id = ${users.id}
-        AND p.status IN ('approved', 'pending')
-        AND p.date >= ${daysAgoSeconds}
-    )
+    ${users.verified} = 1
+    AND ${users.banned} = 0
+    AND COALESCE(
+      (SELECT MAX(p_last.date) FROM ${pireps} p_last WHERE p_last.user_id = ${users.id}),
+      ${users.createdAt}
+    ) < ${cutoffSeconds}
     AND NOT EXISTS (
       SELECT 1 FROM ${leaveRequests} lr
       WHERE lr.user_id = ${users.id}
@@ -86,7 +87,7 @@ async function getInactiveUsersPaginated(
   search?: string
 ): Promise<{ users: InactiveUserOutput[]; total: number }> {
   const offset = (page - 1) * limit;
-  const { nowSeconds, daysAgoSeconds } = await getInactivityTimeframe();
+  const { nowSeconds, cutoffSeconds } = await getInactivityTimeframe();
 
   const searchCondition = search
     ? sql<boolean>`(
@@ -96,6 +97,10 @@ async function getInactiveUsersPaginated(
     : sql<boolean>`1 = 1`;
 
   const lastFlightSubquery = createLastFlightSubquery();
+  const inactiveCondition = createInactiveUsersCondition(
+    nowSeconds,
+    cutoffSeconds
+  );
 
   const result = await db
     .select({
@@ -110,13 +115,7 @@ async function getInactiveUsersPaginated(
     .from(users)
     .leftJoin(lastFlightSubquery, eq(users.id, lastFlightSubquery.userId))
     .innerJoin(airline, sql`1 = 1`)
-    .where(
-      createInactivityWhereCondition(
-        searchCondition,
-        nowSeconds,
-        daysAgoSeconds
-      )
-    )
+    .where(and(searchCondition, inactiveCondition))
     .orderBy(
       sql`COALESCE(${lastFlightSubquery.lastFlight}, 0) DESC`,
       users.name
@@ -134,8 +133,12 @@ async function getInactiveUsersPaginated(
  * Used for cron jobs, no pagination
  */
 async function getAllInactiveUsers(): Promise<InactiveUserOutput[]> {
-  const { nowSeconds, daysAgoSeconds } = await getInactivityTimeframe();
+  const { nowSeconds, cutoffSeconds } = await getInactivityTimeframe();
   const lastFlightSubquery = createLastFlightSubquery();
+  const inactiveCondition = createInactiveUsersCondition(
+    nowSeconds,
+    cutoffSeconds
+  );
 
   const result = await db
     .select({
@@ -149,13 +152,7 @@ async function getAllInactiveUsers(): Promise<InactiveUserOutput[]> {
     .from(users)
     .leftJoin(lastFlightSubquery, eq(users.id, lastFlightSubquery.userId))
     .innerJoin(airline, sql`1 = 1`)
-    .where(
-      createInactivityWhereCondition(
-        sql<boolean>`1 = 1`,
-        nowSeconds,
-        daysAgoSeconds
-      )
-    )
+    .where(inactiveCondition)
     .orderBy(
       sql`COALESCE(${lastFlightSubquery.lastFlight}, 0) DESC`,
       users.name
@@ -164,4 +161,10 @@ async function getAllInactiveUsers(): Promise<InactiveUserOutput[]> {
   return result as InactiveUserOutput[];
 }
 
-export { getAllInactiveUsers, getInactiveUsersPaginated };
+export {
+  createInactiveUsersCondition,
+  createLastFlightSubquery,
+  getAllInactiveUsers,
+  getInactiveUsersPaginated,
+  getInactivityTimeframe,
+};

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { parseAsInteger, useQueryState } from 'nuqs';
 
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { DataPagination } from '@/components/ui/data-pagination';
 import {
@@ -21,7 +22,9 @@ import { Airline } from '@/db/schema';
 
 interface UsersTableProps {
   airline: Airline;
-  users: User[];
+  users: Array<
+    User & { isInactive?: boolean | number; lastFlight?: number | null }
+  >;
   total: number;
   limit?: number;
 }
@@ -50,6 +53,25 @@ export function UsersTable({
     return airlinePrefix ? `${airlinePrefix}${user.callsign}` : user.callsign;
   }
 
+  function getStatusLabel(
+    user: User & { isInactive?: boolean | number; lastFlight?: number | null }
+  ) {
+    if (user.banned) {
+      return { label: 'Removed', variant: 'destructive' as const };
+    }
+    if (!user.verified) {
+      return { label: 'Pending', variant: 'pending' as const };
+    }
+    if (!user.lastFlight) {
+      return { label: 'No Flights', variant: 'info' as const };
+    }
+    const inactive = Boolean(user.isInactive);
+    if (inactive) {
+      return { label: 'Inactive', variant: 'secondary' as const };
+    }
+    return { label: 'Active', variant: 'approved' as const };
+  }
+
   return (
     <>
       <div className="overflow-hidden rounded-md border border-border bg-panel shadow-sm">
@@ -70,6 +92,9 @@ export function UsersTable({
               </TableHead>
               <TableHead className="bg-muted/50 font-semibold text-foreground">
                 Joined
+              </TableHead>
+              <TableHead className="bg-muted/50 font-semibold text-foreground">
+                Status
               </TableHead>
               <TableHead className="w-[50px] bg-muted/50" />
             </TableRow>
@@ -122,6 +147,14 @@ export function UsersTable({
                       month: 'short',
                       day: 'numeric',
                     })}
+                  </TableCell>
+                  <TableCell className="text-foreground">
+                    {(() => {
+                      const status = getStatusLabel(user);
+                      return (
+                        <Badge variant={status.variant}>{status.label}</Badge>
+                      );
+                    })()}
                   </TableCell>
                   <TableCell>
                     <Button size="sm" asChild>

@@ -1,6 +1,11 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 import { db } from '@/db';
+import {
+  createInactiveUsersCondition,
+  createLastFlightSubquery,
+  getInactivityTimeframe,
+} from '@/db/queries/inactivity';
 import { airline, pireps, type User, users } from '@/db/schema';
 
 async function getFlightTimeForUser(userId: string): Promise<number> {
@@ -18,12 +23,21 @@ async function getFlightTimeForUser(userId: string): Promise<number> {
   return result?.totalFlightTime ?? 0;
 }
 
+interface UsersQueryOptions {
+  hideInactive?: boolean;
+}
+
 async function getUsersPaginated(
   page: number,
   limit: number,
-  search?: string
-): Promise<{ users: User[]; total: number }> {
+  search?: string,
+  options?: UsersQueryOptions
+): Promise<{
+  users: Array<User & { isInactive: number; lastFlight: number | null }>;
+  total: number;
+}> {
   const offset = (page - 1) * limit;
+  const hideInactive = options?.hideInactive ?? false;
 
   const searchCondition = search
     ? sql<boolean>`(
@@ -34,6 +48,23 @@ async function getUsersPaginated(
         OR (${users.callsign} IS NOT NULL AND ${airline.callsign} || CAST(${users.callsign} AS TEXT) LIKE ${`%${search}%`} COLLATE NOCASE)
       )`
     : sql<boolean>`1 = 1`;
+
+  const { nowSeconds, cutoffSeconds } = await getInactivityTimeframe();
+  const inactiveCondition = createInactiveUsersCondition(
+    nowSeconds,
+    cutoffSeconds
+  );
+  const lastFlightSubquery = createLastFlightSubquery();
+  const filterCondition = (
+    hideInactive
+      ? (and(
+          searchCondition,
+          eq(users.verified, true),
+          eq(users.banned, false),
+          sql<boolean>`NOT (${inactiveCondition})`
+        ) ?? searchCondition)
+      : searchCondition
+  ) as ReturnType<typeof sql<boolean>>;
 
   const result = await db
     .select({
@@ -49,19 +80,29 @@ async function getUsersPaginated(
       bannedReason: users.bannedReason,
       banExpires: users.banExpires,
       discordUsername: users.discordUsername,
+      discourseUsername: users.discourseUsername,
+      infiniteFlightId: users.infiniteFlightId,
       createdAt: users.createdAt,
       updatedAt: users.updatedAt,
+      lastFlight: lastFlightSubquery.lastFlight,
+      isInactive:
+        sql<number>`CASE WHEN ${inactiveCondition} THEN 1 ELSE 0 END`.as(
+          'isInactive'
+        ),
       totalCount: sql<number>`COUNT(*) OVER()`.as('totalCount'),
     })
     .from(users)
+    .leftJoin(lastFlightSubquery, eq(users.id, lastFlightSubquery.userId))
     .leftJoin(airline, sql`1 = 1`)
-    .where(searchCondition)
+    .where(filterCondition)
     .orderBy(users.createdAt)
     .limit(limit)
     .offset(offset);
 
   return {
-    users: result.map(({ totalCount: _totalCount, ...user }) => user) as User[],
+    users: result.map(({ totalCount: _totalCount, ...user }) => user) as Array<
+      User & { isInactive: number; lastFlight: number | null }
+    >,
     total: result[0]?.totalCount ?? 0,
   };
 }
