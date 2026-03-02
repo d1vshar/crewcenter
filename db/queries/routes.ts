@@ -431,7 +431,7 @@ function buildFtsMatchQuery(query: string): string {
     .trim()
     .split(/\s+/)
     .map((t) => `"${t.replace(/"/g, '""')}"*`)
-    .join(' OR ');
+    .join(' AND ');
 }
 
 async function searchRoutesWithFts(
